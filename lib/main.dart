@@ -9,6 +9,7 @@ import 'package:timeago_flutter/timeago_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 import 'package:http/http.dart' as http;
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 void main() {
   runApp(const MyApp());
@@ -187,7 +188,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   Future<Map<String, dynamic>> _submitLogEntriesToServer() async {
-    final uri = Uri.parse("http://localhost:3000/api/submit");
+    final uri = Uri.parse("https://speedlimits.shryder.me/api/submit");
 
     final response = await http.post(
       uri,
@@ -231,7 +232,9 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    const presetLimits = [ 40, 60, 80, 100, 120 ];
+    WakelockPlus.enable(); // Prevent app from sleepin
+
+    const presetLimits = [ 40, 60, 70, 80, 100, 120 ];
     var lat = "";
     var lng = "";
     if (_currentPosition != null) {
