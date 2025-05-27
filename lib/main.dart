@@ -10,9 +10,37 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 import 'package:http/http.dart' as http;
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const MyApp());
+}
+
+class PreferencesService {
+  static Future<void> savePositionList(List<LogEntry> logs) async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<Map<String, dynamic>> jsonList = logs.map((p) => p.toJson()).toList();
+    final jsonString = jsonEncode(jsonList);
+    await prefs.setString('log_entries', jsonString);
+  }
+
+  static Future<List<LogEntry>> loadLogEntries() async {
+    final prefs = await SharedPreferences.getInstance();
+    final jsonString = prefs.getString('log_entries');
+
+    if (jsonString == null) {
+      return [];
+    }
+
+    try {
+      final List<dynamic> jsonList = jsonDecode(jsonString);
+      return jsonList
+          .map((json) => LogEntry.fromJson(json))
+          .toList();
+    } catch (e) {
+      return [];
+    }
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -39,9 +67,40 @@ class MyHomePage extends StatefulWidget {
   State<MyHomePage> createState() => _MyHomePageState();
 }
 
+class PositionEntry {
+  final double lat;
+  final double long;
+  final DateTime timestamp;
+  final double heading;
+  final double speed;
+
+  const PositionEntry(this.lat, this.long, this.timestamp, this.heading,
+      this.speed);
+
+  Map<String, dynamic> toJson() {
+    return {
+      'lat': lat,
+      'long': long,
+      'timestamp': timestamp.millisecondsSinceEpoch,
+      'heading': heading,
+      'speed': speed,
+    };
+  }
+
+  factory PositionEntry.fromJson(Map<String, dynamic> json) {
+    return PositionEntry(
+      (json['lat'] as num).toDouble(),
+      (json['long'] as num).toDouble(),
+      DateTime.fromMillisecondsSinceEpoch(json['timestamp'] as int),
+      (json['heading'] as num).toDouble(),
+      (json['speed'] as num).toDouble(),
+    );
+  }
+}
+
 class LogEntry {
-  final Position gpsLocation;
-  final List<Position> previousGpsLocations;
+  final PositionEntry gpsLocation;
+  final List<PositionEntry> previousGpsLocations;
   final int speedLimit;
   final int timestamp;
   final String uuid;
@@ -50,17 +109,29 @@ class LogEntry {
 
   Map<String, dynamic> toJson() => {
     'gpsLocation': gpsLocation,
-    'previousLocations': previousGpsLocations,
+    'previousGpsLocations': previousGpsLocations,
     'speedLimit': speedLimit,
     'timestamp':  timestamp,
     'uuid':       uuid,
   };
+
+  factory LogEntry.fromJson(Map<String, dynamic> json) {
+    return LogEntry(
+      PositionEntry.fromJson(json['gpsLocation'] as Map<String, dynamic>),
+      (json['previousGpsLocations'] as List<dynamic>)
+          .map((item) => PositionEntry.fromJson(item as Map<String, dynamic>))
+          .toList(),
+      json['speedLimit'] as int,
+      json['timestamp'] as int,
+      json['uuid'] as String,
+    );
+  }
 }
 
 class _MyHomePageState extends State<MyHomePage> {
   Position? _currentPosition;
-  final _previousPositions = <Position>[];
-  final _logEntries = <LogEntry>[];
+  final _previousPositions = <PositionEntry>[];
+  var _logEntries = <LogEntry>[];
   LocationPermission _locationPermission = LocationPermission.denied;
   bool _gpsEnabled = false;
   bool _submittingEntries = false;
@@ -93,7 +164,7 @@ class _MyHomePageState extends State<MyHomePage> {
       if (now.difference(lastSaved).inSeconds >= 5) {
         lastSaved = now;
 
-        _previousPositions.add(position);
+        _previousPositions.add(getCurrentPosition());
 
         if (_previousPositions.length > 3) {
           _previousPositions.removeAt(0);
@@ -130,10 +201,22 @@ class _MyHomePageState extends State<MyHomePage> {
     });
   }
 
+  void _fetchSavedLogs() async {
+    var entries = await PreferencesService.loadLogEntries();
+    if (entries.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _logEntries = entries;
+    });
+  }
+
   @override
   void initState() {
     super.initState();
 
+    _fetchSavedLogs();
     _checkLocationPermission().then((_) => _checkGPSEnabled()).then((_) => _subscribeToLocationStream());
   }
 
@@ -159,16 +242,36 @@ class _MyHomePageState extends State<MyHomePage> {
     });
   }
 
+  PositionEntry getCurrentPosition() {
+    return PositionEntry(_currentPosition!.latitude, _currentPosition!.longitude, _currentPosition!.timestamp, _currentPosition!.heading, _currentPosition!.speed);
+  }
+
+  void _clearAllLogs() {
+    setState(() {
+      _logEntries.clear();
+    });
+
+    PreferencesService.savePositionList(_logEntries);
+  }
+
+  void _removeLogEntry(index) {
+    setState(() {
+      _logEntries.removeAt(index);
+    });
+
+    PreferencesService.savePositionList(_logEntries);
+  }
+
   void _logSpeedLimit(speed) {
     if (_currentPosition == null) {
       return;
     }
 
-
     setState(() {
-      _logEntries.add(LogEntry(_currentPosition!, _previousPositions, speed, DateTime.now().millisecondsSinceEpoch, Uuid().v4()));
+      _logEntries.add(LogEntry(getCurrentPosition(), _previousPositions, speed, DateTime.now().millisecondsSinceEpoch, Uuid().v4()));
     });
 
+    PreferencesService.savePositionList(_logEntries);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -234,7 +337,7 @@ class _MyHomePageState extends State<MyHomePage> {
   Widget build(BuildContext context) {
     WakelockPlus.enable(); // Prevent app from sleepin
 
-    const presetLimits = [ 40, 60, 70, 80, 100, 120 ];
+    const presetLimits = [ 30, 40, 50, 60, 70, 80, 100, 120 ];
     var lat = "";
     var lng = "";
     if (_currentPosition != null) {
@@ -242,200 +345,214 @@ class _MyHomePageState extends State<MyHomePage> {
       lng = _currentPosition?.longitude.toStringAsFixed(6) ?? '—';
     }
 
-    Position? lastSavedPosition;
+    PositionEntry? lastSavedPosition;
     if (_previousPositions.isNotEmpty) {
       lastSavedPosition = _previousPositions[_previousPositions.length - 1];
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: Text(widget.title),
-      ),
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            _gpsEnabled ? Text("GPS is Enabled.") : Text("GPS is NOT enabled!", style: TextStyle(color: Colors.red)),
-            Text(_buildPermissionText(), textAlign: TextAlign.center,),
-            Text("Longtitude: ${lng} Latitude $lat", textAlign: TextAlign.center,),
-            lastSavedPosition != null ? Timeago(
-                date: lastSavedPosition.timestamp,
-                refreshRate: const Duration(seconds: 1),
-                builder: (context, value) {
-                  if (lastSavedPosition!.timestamp.difference(DateTime.now()).inSeconds > 10) {
-                    return Text("WARNING! Last location update was too long ago: $value");
-                  }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return Scaffold(
+          appBar: constraints.maxHeight < 400 ? null : AppBar(
+            backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+            title: Text(widget.title),
+          ),
+          body: SingleChildScrollView(
+              child: Container(
+                  child: Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: <Widget>[
+                        _gpsEnabled ? Text("GPS is Enabled.") : Text("GPS is NOT enabled!", style: TextStyle(color: Colors.red)),
+                        Text(_buildPermissionText(), textAlign: TextAlign.center,),
+                        Text("Longtitude: ${lng} Latitude $lat", textAlign: TextAlign.center,),
+                        lastSavedPosition != null ? Timeago(
+                            date: lastSavedPosition.timestamp,
+                            refreshRate: const Duration(seconds: 1),
+                            builder: (context, value) {
+                              if (lastSavedPosition!.timestamp.difference(DateTime.now()).inSeconds > 10) {
+                                return Text("WARNING! Last location update was too long ago: $value");
+                              }
 
-                  return Text("GPS Position is up to date.");
-                }
-            ) : Text(
-                "No last position. This message should disappear in a few seconds.",
-                style: TextStyle(color: Colors.red),
-                textAlign: TextAlign.center
-            ),
+                              return Text("GPS Position is up to date.");
+                            }
+                        ) : Text(
+                            "No last position. This message should disappear in a few seconds.",
+                            style: TextStyle(color: Colors.red),
+                            textAlign: TextAlign.center
+                        ),
 
-            GestureDetector(
-                onTap: () async {
-                  try {
-                    await _openInMaps(_currentPosition?.latitude, _currentPosition?.longitude);
-                  } catch (e) {
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text(e.toString())),
-                      );
-                    }
-                  }
-                },
-                child: Text(
-                  "Open Google Maps at current location",
-                  style: TextStyle(
-                    color: Colors.blue,
-                    decoration: TextDecoration.underline,
-                  ),
-                )
-            ),
-
-            SizedBox( height: 24 ),
-
-            Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              alignment: WrapAlignment.center,
-
-              children: presetLimits.map((limit) {
-                return SpeedLimitButton(speed: limit, onPressed: () {
-                  _logSpeedLimit(limit);
-                });
-              }).toList(),
-            ),
-
-            SizedBox( height: 24 ),
-
-            SizedBox(
-              height: 200, // whatever height you want
-              child: ListView.builder(
-                controller: _scrollController,
-                itemCount: _logEntries.length,
-                itemBuilder: (context, index) {
-                  var logEntry = _logEntries[index];
-
-                  var speedLimit = logEntry.speedLimit;
-                  var long = logEntry.gpsLocation.longitude;
-                  var lat = logEntry.gpsLocation.latitude;
-
-                  return Dismissible(
-                      key: ValueKey(logEntry),
-                      direction: DismissDirection.endToStart,
-                      background: Container(
-                        color: Colors.red,
-                        alignment: Alignment.centerRight,
-                        padding: const EdgeInsets.symmetric(horizontal: 20),
-                        child: const Icon(Icons.delete, color: Colors.white),
-                      ),
-                      onDismissed: (dir) {
-                        setState(() {
-                          _logEntries.removeAt(index);
-                        });
-
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Entry deleted')),
-                        );
-                      },
-                      child: Timeago(
-                          date: DateTime.fromMillisecondsSinceEpoch(logEntry.timestamp),
-                          refreshRate: const Duration(seconds: 1),
-                          builder: (context, value) {
-                            return ListTile(
-                              onTap: () async {
-                                try {
-                                  await _openInMaps(lat, long);
-                                } catch (e) {
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(content: Text(e.toString())),
-                                    );
-                                  }
+                        GestureDetector(
+                            onTap: () async {
+                              try {
+                                await _openInMaps(_currentPosition?.latitude, _currentPosition?.longitude);
+                              } catch (e) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text(e.toString())),
+                                  );
                                 }
-                              },
-                              title: Text.rich(
-                                TextSpan(
-                                  text: "[$value] Reported $speedLimit kmph speed limit at ",
-                                  children: [
-                                    TextSpan(
-                                        text: "${long.toStringAsFixed(6)} ; ${lat.toStringAsFixed(6)}",
-                                      style: TextStyle(
-                                        color: Colors.blue,
-                                        decoration: TextDecoration.underline,
-                                      )
-                                    )
-                                  ]
-                                )
-                              )
-                            );
-                          }
-                      )
-                  );
-                },
-              ),
-            )
-          ],
-        ),
-      ),
-      floatingActionButton: SpeedDial(
-          tooltip: "Submit Logs to Server",
-          icon: Icons.add,
-          children: [
-            SpeedDialChild(
-              onTap: () async {
-                if (_submittingEntries) return;
+                              }
+                            },
+                            child: Text(
+                              "Open Google Maps at current location",
+                              style: TextStyle(
+                                color: Colors.blue,
+                                decoration: TextDecoration.underline,
+                              ),
+                            )
+                        ),
 
-                _submittingEntries = true;
+                        SizedBox( height: 24 ),
 
-                showDialog(
-                  context: context,
-                  barrierDismissible: false,
-                  builder: (_) => const Center(
-                    child: CircularProgressIndicator(),
-                  ),
-                );
+                        Wrap(
+                          spacing: 12,
+                          runSpacing: 12,
+                          alignment: WrapAlignment.center,
 
-                try {
-                  await _submitLogEntriesToServer();
+                          children: presetLimits.map((limit) {
+                            return SpeedLimitButton(speed: limit, onPressed: () {
+                              _logSpeedLimit(limit);
+                            });
+                          }).toList(),
+                        ),
 
-                  if (context.mounted) {
-                    // Successfully submitted speed limits to the server
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text("Successfully submitted speed limits to the server", style: TextStyle(color: Colors.black)), backgroundColor: Colors.greenAccent),
-                    );
-                  }
-                } catch (e) {
-                  if (context.mounted) {
-                    // Could be success message too lol
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text(e.toString(), style: TextStyle(color: Colors.white)), backgroundColor: Colors.redAccent),
-                    );
-                  }
-                }
+                        SizedBox( height: 24 ),
 
-                if (context.mounted) {
-                  Navigator.of(context, rootNavigator: true).pop();
-                }
+                        SizedBox(
+                          height: 200, // whatever height you want
+                          child: ListView.builder(
+                            controller: _scrollController,
+                            itemCount: _logEntries.length,
+                            itemBuilder: (context, index) {
+                              var logEntry = _logEntries[index];
 
-                _submittingEntries = false;
-              },
-              child: const Icon(Icons.upload),
-              label: "Upload to server"
-            ),
-            SpeedDialChild(
-              onTap: () {
-                Clipboard.setData(ClipboardData(text: _buildClipboardData()));
-              },
-              child: const Icon(Icons.copy),
-              label: "Copy to clipboard"
-            )
-          ]
-      ),
+                              var speedLimit = logEntry.speedLimit;
+                              var long = logEntry.gpsLocation.long;
+                              var lat = logEntry.gpsLocation.lat;
+
+                              return Dismissible(
+                                  key: ValueKey(logEntry),
+                                  direction: DismissDirection.endToStart,
+                                  background: Container(
+                                    color: Colors.red,
+                                    alignment: Alignment.centerRight,
+                                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                                    child: const Icon(Icons.delete, color: Colors.white),
+                                  ),
+                                  onDismissed: (dir) {
+                                    _removeLogEntry(index);
+
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text('Entry deleted')),
+                                    );
+                                  },
+                                  child: Timeago(
+                                      date: DateTime.fromMillisecondsSinceEpoch(logEntry.timestamp),
+                                      refreshRate: const Duration(seconds: 1),
+                                      builder: (context, value) {
+                                        return ListTile(
+                                            onTap: () async {
+                                              try {
+                                                await _openInMaps(lat, long);
+                                              } catch (e) {
+                                                if (context.mounted) {
+                                                  ScaffoldMessenger.of(context).showSnackBar(
+                                                    SnackBar(content: Text(e.toString())),
+                                                  );
+                                                }
+                                              }
+                                            },
+                                            title: Text.rich(
+                                                TextSpan(
+                                                    text: "[$value] Reported $speedLimit kmph speed limit at ",
+                                                    children: [
+                                                      TextSpan(
+                                                          text: "${long.toStringAsFixed(6)} ; ${lat.toStringAsFixed(6)}",
+                                                          style: TextStyle(
+                                                            color: Colors.blue,
+                                                            decoration: TextDecoration.underline,
+                                                          )
+                                                      )
+                                                    ]
+                                                )
+                                            )
+                                        );
+                                      }
+                                  )
+                              );
+                            },
+                          ),
+                        )
+                      ],
+                    ),
+                  )
+              )
+          ),
+          floatingActionButton: SpeedDial(
+              tooltip: "Submit Logs to Server",
+              icon: Icons.add,
+              children: [
+                SpeedDialChild(
+                    onTap: () async {
+                      if (_submittingEntries) return;
+
+                      _submittingEntries = true;
+
+                      showDialog(
+                        context: context,
+                        barrierDismissible: false,
+                        builder: (_) => const Center(
+                          child: CircularProgressIndicator(),
+                        ),
+                      );
+
+                      try {
+                        await _submitLogEntriesToServer();
+
+                        if (context.mounted) {
+                          // Successfully submitted speed limits to the server
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text("Successfully submitted speed limits to the server", style: TextStyle(color: Colors.black)), backgroundColor: Colors.greenAccent),
+                          );
+                        }
+                      } catch (e) {
+                        if (context.mounted) {
+                          // Could be success message too lol
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text(e.toString(), style: TextStyle(color: Colors.white)), backgroundColor: Colors.redAccent),
+                          );
+                        }
+                      }
+
+                      if (context.mounted) {
+                        Navigator.of(context, rootNavigator: true).pop();
+                      }
+
+                      _submittingEntries = false;
+                    },
+                    child: const Icon(Icons.upload),
+                    label: "Upload to server"
+                ),
+                SpeedDialChild(
+                    onTap: () {
+                      Clipboard.setData(ClipboardData(text: _buildClipboardData()));
+                    },
+                    child: const Icon(Icons.copy),
+                    label: "Copy to clipboard"
+                ),
+                SpeedDialChild(
+                    onTap: () {
+                      _clearAllLogs();
+                    },
+                    child: const Icon(Icons.delete_forever),
+                    label: "Clear all logs"
+                ),
+
+              ]
+          ),
+        );
+      }
     );
   }
 }
